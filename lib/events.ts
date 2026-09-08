@@ -1,6 +1,6 @@
 export const EVENT_GAP_MS = 6 * 60 * 60 * 1000;
 
-export type DatedPhoto = { takenAt: Date | null };
+export type DatedPhoto = { takenAt: Date | null; selectedForStory?: boolean };
 
 export type GroupedEvent<T extends DatedPhoto> = {
   photos: T[];
@@ -12,7 +12,7 @@ export type GroupedEvent<T extends DatedPhoto> = {
 /** Groups dated photos chronologically. Undated photos are deliberately omitted. */
 export function groupPhotosIntoEvents<T extends DatedPhoto>(photos: T[]): GroupedEvent<T>[] {
   const dated = photos
-    .filter((photo): photo is T & { takenAt: Date } => photo.takenAt instanceof Date && !Number.isNaN(photo.takenAt.getTime()))
+    .filter((photo): photo is T & { takenAt: Date } => photo.selectedForStory !== false && photo.takenAt instanceof Date && !Number.isNaN(photo.takenAt.getTime()))
     .sort((a, b) => a.takenAt.getTime() - b.takenAt.getTime());
 
   const groups: Array<Array<T & { takenAt: Date }>> = [];
