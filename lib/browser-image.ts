@@ -1,4 +1,5 @@
 import { dHashFromRgba, PerceptualImage } from "./similarity";
+import { calculateQualityScore, qualityMetricsFromRgba } from "./quality";
 
 function cropHash(pixels: Uint8ClampedArray, sourceWidth: number, left: number, top: number) {
   const crop = new Uint8ClampedArray(9 * 8 * 4);
@@ -46,4 +47,20 @@ export async function createPerceptualImage(file: File): Promise<PerceptualImage
   } finally {
     bitmap?.close();
   }
+}
+
+/** Samples a decoded local image; no pixels or metadata leave the browser. */
+export async function createImageQualityScore(file: File): Promise<number> {
+  let bitmap: ImageBitmap | undefined;
+  try {
+    bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+    const scale = Math.min(1, 192 / Math.max(bitmap.width, bitmap.height));
+    const width = Math.max(2, Math.round(bitmap.width * scale)), height = Math.max(2, Math.round(bitmap.height * scale));
+    const canvas = document.createElement("canvas"); canvas.width = width; canvas.height = height;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) throw new Error("2D canvas context unavailable");
+    context.drawImage(bitmap, 0, 0, width, height);
+    const pixels = context.getImageData(0, 0, width, height).data;
+    return calculateQualityScore(qualityMetricsFromRgba(pixels, width, height, bitmap.width, bitmap.height, file.size));
+  } finally { bitmap?.close(); }
 }
