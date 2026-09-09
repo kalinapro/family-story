@@ -1,11 +1,13 @@
 "use client";
 
-import { ChangeEvent, DragEvent, useMemo, useRef, useState } from "react";
+import { ChangeEvent, DragEvent, useEffect, useMemo, useRef, useState } from "react";
 import * as exifr from "exifr";
 import { groupPhotosIntoEvents } from "@/lib/events";
 import { getDuplicateGroups, getPhotoStats, PhotoSort, setStoryParticipation, sortPhotos } from "@/lib/photos";
+import { createPerceptualImage } from "@/lib/browser-image";
+import { getCandidatePairs, groupSimilarPhotos } from "@/lib/similarity";
 
-type Photo = { id: string; file: File; fileName: string; url: string; takenAt: Date | null; selectedForStory: boolean; hash?: string; faceIds: string[]; qualityScore: number | null; similarityGroupId: string | null };
+type Photo = { id: string; file: File; fileName: string; url: string; takenAt: Date | null; selectedForStory: boolean; hash?: string; perceptual?: Awaited<ReturnType<typeof createPerceptualImage>>; perceptualError?: string; faceIds: string[]; qualityScore: number | null; similarityGroupId: string | null };
 type FamilyEvent = { id: string; title: string; photos: Photo[]; start: Date; end: Date };
 type View = "all" | "timeline" | "excluded" | "duplicates" | "similar";
 const ACCEPTED_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -30,8 +32,35 @@ export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const stats = useMemo(() => getPhotoStats(photos), [photos]);
   const duplicates = useMemo(() => getDuplicateGroups(photos), [photos]);
+  const similarityPairs = useMemo(() => getCandidatePairs(photos), [photos]);
+  const similarGroups = useMemo(() => groupSimilarPhotos(photos, similarityPairs), [photos, similarityPairs]);
   const displayed = useMemo(() => sortPhotos(view === "excluded" ? photos.filter((p) => !p.selectedForStory) : photos, sort), [photos, sort, view]);
   const undated = photos.filter((photo) => !photo.takenAt && photo.selectedForStory);
+
+  useEffect(() => {
+    if (process.env.NODE_ENV !== "development") return;
+    for (const pair of similarityPairs) {
+      console.groupCollapsed(`[similarity] ${pair.first.fileName} ↔ ${pair.second.fileName}: similar=${pair.similar}`);
+      console.table({
+        files: `${pair.first.fileName} ↔ ${pair.second.fileName}`,
+        firstExifTime: pair.first.takenAt?.toISOString() ?? null,
+        secondExifTime: pair.second.takenAt?.toISOString() ?? null,
+        timeDifferenceSeconds: pair.timeDifferenceSeconds,
+        firstDHash: pair.first.perceptual?.hash ?? null,
+        secondDHash: pair.second.perceptual?.hash ?? null,
+        firstHashBits: pair.first.perceptual?.hash.length ?? 0,
+        secondHashBits: pair.second.perceptual?.hash.length ?? 0,
+        hammingDistance: pair.distance,
+        aspectRatio: `${pair.first.perceptual?.aspectRatio ?? "?"} ↔ ${pair.second.perceptual?.aspectRatio ?? "?"}`,
+        orientationApplied: `${pair.first.perceptual?.orientationApplied ?? false} ↔ ${pair.second.perceptual?.orientationApplied ?? false}`,
+        pixelDataReadable: `${pair.first.perceptual?.pixelDataReadable ?? false} ↔ ${pair.second.perceptual?.pixelDataReadable ?? false}`,
+        source: "File pixels decoded by createImageBitmap (object URL and metadata are not hashed)",
+        similar: pair.similar,
+        rejectionReason: pair.rejectionReason ?? null,
+      });
+      console.groupEnd();
+    }
+  }, [similarityPairs]);
 
   async function addFiles(list: FileList | File[]) {
     const incoming = Array.from(list); const valid = incoming.filter((file) => ACCEPTED_TYPES.has(file.type) || /\.(jpe?g|png|webp)$/i.test(file.name));
@@ -41,7 +70,10 @@ export default function Home() {
       let takenAt: Date | null = null;
       try { const data = await exifr.parse(file, ["DateTimeOriginal", "CreateDate"]); const value = data?.DateTimeOriginal ?? data?.CreateDate; if (value) takenAt = value instanceof Date ? value : new Date(value); if (takenAt && Number.isNaN(takenAt.getTime())) takenAt = null; } catch { takenAt = null; }
       let hash: string | undefined; try { hash = await sha256(file); } catch { hash = undefined; }
-      return { id: crypto.randomUUID(), file, fileName: file.name, url: URL.createObjectURL(file), takenAt, selectedForStory: true, hash, faceIds: [], qualityScore: null, similarityGroupId: null };
+      let perceptual: Photo["perceptual"]; let perceptualError: string | undefined;
+      try { perceptual = await createPerceptualImage(file); }
+      catch (error) { perceptualError = error instanceof DOMException && error.name === "SecurityError" ? "tainted canvas (SecurityError)" : error instanceof Error ? error.message : "image decode failed"; }
+      return { id: crypto.randomUUID(), file, fileName: file.name, url: URL.createObjectURL(file), takenAt, selectedForStory: true, hash, perceptual, perceptualError, faceIds: [], qualityScore: null, similarityGroupId: null };
     }));
     setPhotos((current) => { const next = [...current, ...loaded]; setEvents(makeEvents(next)); return next; }); setReading(false); if (inputRef.current) inputRef.current.value = "";
   }
@@ -66,7 +98,7 @@ export default function Home() {
       <div className="stats five"><div><strong>{stats.total}</strong><span>Всего<br />фотографий</span></div><div><strong>{stats.selected}</strong><span>Участвуют<br />в истории</span></div><div><strong>{stats.excluded}</strong><span>Исключено</span></div><div><strong>{stats.duplicateCopies}/{stats.duplicateGroups}</strong><span>Дублей /<br />групп</span></div><div><strong>{stats.undated}</strong><span>Без даты</span></div></div>
       {(view === "all" || view === "excluded") && <><div className="collection-heading"><div><span className="section-kicker">{view === "excluded" ? "НЕ УЧАСТВУЮТ В ИСТОРИИ" : "ВАША КОЛЛЕКЦИЯ"}</span><h2>{view === "excluded" ? "Исключённые фотографии" : "Семейные моменты"}</h2></div><div className="actions"><label>Сортировка <select value={sort} onChange={(e) => setSort(e.target.value as PhotoSort)}><option value="oldest">По дате: сначала старые</option><option value="newest">По дате: сначала новые</option><option value="name">По имени файла</option></select></label><button className="clear" onClick={clearAll}>Очистить всё</button></div></div>{displayed.length ? <div className="photo-grid">{displayed.map((photo) => photoCard(photo))}</div> : <div className="empty-state">Здесь пока нет фотографий.</div>}</>}
       {view === "duplicates" && <><div className="collection-heading"><div><span className="section-kicker">СРАВНЕНИЕ СОДЕРЖИМОГО SHA-256</span><h2>Точные дубли</h2></div></div>{duplicates.length ? <div className="duplicate-list">{duplicates.map((group, index) => <section className="duplicate-group" key={group[0].hash}><header><div><h3>Группа {index + 1}</h3><p>{group.length} одинаковых копии. Выберите одну основную — остальные можно исключить, но они останутся в коллекции.</p></div><button onClick={() => excludeDuplicateCopies(group)}>Оставить первую в истории</button></header><div className="photo-grid">{group.map((photo) => photoCard(photo))}</div></section>)}</div> : <div className="empty-state">Точных дублей не найдено.</div>}</>}
-      {view === "similar" && <div className="similar-placeholder"><span>◌</span><h2>Похожие кадры</h2><p>Раздел подготовлен для локальной группировки похожих снимков. На следующем этапе здесь можно будет сравнить кадры и выбрать лучший — без автоматического удаления.</p></div>}
+      {view === "similar" && <><div className="similar-placeholder"><span>◌</span><h2>Похожие кадры</h2><p>{similarGroups.length ? `Найдено групп: ${similarGroups.length}. Сравнение выполнено локально, без отправки фотографий.` : "Похожих кадров в пределах пяти минут не найдено."}</p></div>{process.env.NODE_ENV === "development" && <section className="similarity-debug"><h2>Диагностика похожести</h2><p>10 ближайших пар по Hamming distance</p><ol>{similarityPairs.filter((pair) => pair.distance !== null).toSorted((a, b) => a.distance! - b.distance!).slice(0, 10).map((pair) => <li key={`${pair.first.id}-${pair.second.id}`}><span>{pair.first.fileName} ↔ {pair.second.fileName}</span><strong>{pair.distance}</strong></li>)}</ol>{!similarityPairs.some((pair) => pair.distance !== null) && <p>Нет пар с доступными пикселями и EXIF-временем в пределах 5 минут.</p>}</section>}</>}
       {view === "timeline" && (openEvent ? <div className="event-detail"><button className="back-button" onClick={() => setOpenEventId(null)}>← Назад к хронологии</button><div className="event-detail-heading"><div><span className="section-kicker">СОБЫТИЕ</span><input aria-label="Название события" value={openEvent.title} onChange={(e) => renameEvent(openEvent.id, e.target.value)} /><p>{formatRange(openEvent.start, openEvent.end)} · {openEvent.photos.length} фото</p></div><div className="merge-actions"><button disabled={!openIndex} onClick={() => mergeEvent(openIndex, -1)}>Объединить с предыдущим</button><button disabled={openIndex === events.length - 1} onClick={() => mergeEvent(openIndex, 1)}>Объединить со следующим</button></div></div><div className="photo-grid">{openEvent.photos.map((photo, i) => photoCard(photo, i ? () => splitEvent(openIndex, i) : undefined))}</div></div> : <><div className="collection-heading"><div><span className="section-kicker">СЕМЕЙНАЯ ИСТОРИЯ</span><h2>Хронология</h2></div><div className="actions"><button className="clear" onClick={clearAll}>Очистить всё</button></div></div><div className="timeline">{events.map((event) => <article className="event-card" key={event.id}><div className="event-cover">{/* eslint-disable-next-line @next/next/no-img-element */}<img src={event.photos[0].url} alt="" /></div><div className="event-content"><span className="event-date">{formatRange(event.start, event.end)}</span><h3>{event.title}</h3><p>{event.photos.length} фото</p><div className="event-previews">{event.photos.slice(0, 5).map((photo) => /* eslint-disable-next-line @next/next/no-img-element */ <img key={photo.id} src={photo.url} alt="" />)}</div><button className="primary-button" onClick={() => setOpenEventId(event.id)}>Открыть событие</button></div></article>)}</div>{!events.length && <div className="empty-state">Для хронологии нужны участвующие в истории фотографии с датой.</div>}{undated.length > 0 && <section className="undated"><span className="section-kicker">ОТДЕЛЬНАЯ КОЛЛЕКЦИЯ</span><h2>Фотографии без даты</h2><p>Эти снимки участвуют в истории, но не включены в автоматические события.</p><div className="photo-grid">{undated.map((photo) => photoCard(photo))}</div></section>}</>)}
     </section>}<footer><span>Семейная история</span><p>Сохраняйте моменты. Берегите воспоминания.</p></footer></main>;
 }
