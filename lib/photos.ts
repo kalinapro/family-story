@@ -4,6 +4,7 @@ export type StoryPhoto = {
   fileName: string;
   selectedForStory: boolean;
   hash?: string;
+  perceptualHash?: string;
   faceIds: string[];
   qualityScore: number | null;
   similarityGroupId: string | null;
