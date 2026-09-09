@@ -1,0 +1,15 @@
+import test from "node:test"; import assert from "node:assert/strict";
+import { clusterFaceDetections, detachFace, isPhotoInCurrentStory, mergePeople, photosWithoutPeople, type FaceDetection, type Person } from "./people.ts";
+const people: Person[] = [{ id:"a", name:"A", faceDetectionIds:["fa"], photoIds:["1","3"], representativePhotoIds:["1"] }, { id:"b", name:"B", faceDetectionIds:["fb"], photoIds:["3"], representativePhotoIds:["3"] }];
+const photo=(id:string,faceIds:string[],manualExcluded=false)=>({id,faceIds,manualExcluded,selectedForStory:true});
+test("photo with selected person is included",()=>assert.equal(isPhotoInCurrentStory(photo("1",["fa"]),["a"],people),true));
+test("photo without selected person is excluded",()=>assert.equal(isPhotoInCurrentStory(photo("2",["fb"]),["a"],people),false));
+test("multi-person photo matches either selected person",()=>assert.equal(isPhotoInCurrentStory(photo("3",["fa","fb"]),["b"],people),true));
+test("changing character selection does not mutate photo",()=>{const value=photo("1",["fa"]); isPhotoInCurrentStory(value,["b"],people); assert.deepEqual(value,photo("1",["fa"]));});
+test("manual exclusion wins",()=>assert.equal(isPhotoInCurrentStory(photo("1",["fa"],true),["a"],people),false));
+test("merge combines person groups",()=>{const result=mergePeople(people,"a","b"); assert.equal(result.length,1); assert.deepEqual(result[0].faceDetectionIds,["fa","fb"]);});
+test("detaching a wrong face creates another person",()=>{const face={id:"fa",photoId:"1",descriptor:[0],box:{x:0,y:0,width:1,height:1},confidence:1}; const result=detachFace(people,"a",face); assert.equal(result.length,3); assert.deepEqual(result.find(person=>person.faceDetectionIds.length===1&&person.faceDetectionIds[0]==="fa")?.faceDetectionIds,["fa"]);});
+test("faceless photos have their own category",()=>assert.deepEqual(photosWithoutPeople([photo("1",[]),photo("2",["fa"])]).map(p=>p.id),["1"]));
+const detection=(id:string,descriptor:number[]):FaceDetection=>({id,photoId:id,descriptor,box:{x:0,y:0,width:1,height:1},confidence:1});
+test("close descriptors cluster",()=>assert.equal(clusterFaceDetections([detection("1",[0,0]),detection("2",[.1,.1])],.2).length,1));
+test("distant descriptors stay separate",()=>assert.equal(clusterFaceDetections([detection("1",[0,0]),detection("2",[1,1])],.2).length,2));
