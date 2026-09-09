@@ -2,9 +2,14 @@ export const SIMILARITY_WINDOW_SECONDS = 5 * 60;
 export const DHASH_BITS = 64;
 export const DHASH_SIMILAR_DISTANCE = 10;
 export const ASPECT_RATIO_TOLERANCE = 0.08;
+export const LUMINANCE_DISTANCE_THRESHOLD = 28;
 
 export type PerceptualImage = {
   hash: string;
+  /** dHashes of nearby crops; compensates for the small camera movement common in a burst. */
+  hashVariants?: string[];
+  /** Mean-normalised 4×4 luminance signature, used to prevent dHash false positives. */
+  luminanceSignature?: number[];
   aspectRatio: number;
   pixelDataReadable: boolean;
   orientationApplied: boolean;
@@ -23,6 +28,7 @@ export type SimilarityPair<T extends SimilarityPhoto = SimilarityPhoto> = {
   second: T;
   timeDifferenceSeconds: number;
   distance: number | null;
+  luminanceDistance?: number | null;
   similar: boolean;
   rejectionReason?: string;
 };
@@ -54,11 +60,23 @@ export function hammingDistance(first: string, second: string): number {
   return distance;
 }
 
+export function minimumHammingDistance(first: PerceptualImage, second: PerceptualImage): number {
+  const firstHashes = first.hashVariants?.length ? first.hashVariants : [first.hash];
+  const secondHashes = second.hashVariants?.length ? second.hashVariants : [second.hash];
+  return Math.min(...firstHashes.flatMap((a) => secondHashes.map((b) => hammingDistance(a, b))));
+}
+
+export function luminanceDistance(first?: number[], second?: number[]): number | null {
+  if (!first || !second || first.length !== 16 || second.length !== 16) return null;
+  return first.reduce((sum, value, index) => sum + Math.abs(value - second[index]), 0) / 16;
+}
+
 export function compareCandidatePair<T extends SimilarityPhoto>(first: T, second: T): SimilarityPair<T> {
   const timeDifferenceSeconds = first.takenAt && second.takenAt
     ? Math.abs(first.takenAt.getTime() - second.takenAt.getTime()) / 1000
     : Number.POSITIVE_INFINITY;
   let distance: number | null = null;
+  let luminanceDifference: number | null = null;
   let rejectionReason: string | undefined;
 
   if (!first.takenAt || !second.takenAt) rejectionReason = "missing EXIF capture time";
@@ -67,13 +85,15 @@ export function compareCandidatePair<T extends SimilarityPhoto>(first: T, second
   else if (!first.perceptual.pixelDataReadable || !second.perceptual.pixelDataReadable) rejectionReason = "canvas pixel data unavailable";
   else if (first.perceptual.hash.length !== DHASH_BITS || second.perceptual.hash.length !== DHASH_BITS) rejectionReason = "invalid dHash bit length";
   else {
-    distance = hammingDistance(first.perceptual.hash, second.perceptual.hash);
+    distance = minimumHammingDistance(first.perceptual, second.perceptual);
+    luminanceDifference = luminanceDistance(first.perceptual.luminanceSignature, second.perceptual.luminanceSignature);
     const aspectDelta = Math.abs(first.perceptual.aspectRatio - second.perceptual.aspectRatio) /
       Math.max(first.perceptual.aspectRatio, second.perceptual.aspectRatio);
     if (aspectDelta > ASPECT_RATIO_TOLERANCE) rejectionReason = "aspect ratios differ";
     else if (distance > DHASH_SIMILAR_DISTANCE) rejectionReason = "Hamming distance above threshold";
+    else if (luminanceDifference !== null && luminanceDifference > LUMINANCE_DISTANCE_THRESHOLD) rejectionReason = "luminance layout differs";
   }
-  return { first, second, timeDifferenceSeconds, distance, similar: !rejectionReason, rejectionReason };
+  return { first, second, timeDifferenceSeconds, distance, luminanceDistance: luminanceDifference, similar: !rejectionReason, rejectionReason };
 }
 
 export function getCandidatePairs<T extends SimilarityPhoto>(photos: T[]): SimilarityPair<T>[] {
